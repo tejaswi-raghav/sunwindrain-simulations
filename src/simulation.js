@@ -108,6 +108,50 @@ export function simulateDay(input = {}) {
 
 export function compareScenarios(config = {}) { return Object.keys(SCENARIOS).map((scenario) => simulateDay({ ...config, scenario })); }
 
+const WEATHER_WEIGHTS = { clear: 0.65, dusty: 0.25, storm: 0.1 };
+
+export function estimateCapexAed(config) {
+  return round(5800 + config.pvCapacityKw * 4250 + config.windCapacityKw * 7000 + config.batteryCapacityKwh * 1286, 0);
+}
+
+export function evaluateDesign(input = {}) {
+  const config = { ...DEFAULT_CONFIG, ...input };
+  const weighted = { selfSufficiencyPercent: 0, selfConsumptionPercent: 0, gridImportKwh: 0, generationKwh: 0, curtailmentKwh: 0 };
+  Object.keys(WEATHER_WEIGHTS).forEach((scenario) => {
+    const metrics = simulateDay({ ...config, scenario }).metrics;
+    const weight = WEATHER_WEIGHTS[scenario];
+    Object.keys(weighted).forEach((key) => { weighted[key] += metrics[key] * weight; });
+  });
+  Object.keys(weighted).forEach((key) => { weighted[key] = round(weighted[key], 1); });
+  return {
+    config,
+    metrics: weighted,
+    capexAed: estimateCapexAed(config),
+    annualGridCostAed: round(weighted.gridImportKwh * 365 * 0.38, 0),
+  };
+}
+
+export function optimizeDesign(input = {}, goal = "balanced") {
+  const config = { ...DEFAULT_CONFIG, ...input };
+  const candidates = [];
+  for (let pv = 0.6; pv <= 2.01; pv += 0.2) {
+    for (let wind = 0; wind <= 1.01; wind += 0.2) {
+      for (let battery = 2; battery <= 8.01; battery += 1) {
+        const design = evaluateDesign({ ...config, pvCapacityKw: round(pv, 1), windCapacityKw: round(wind, 1), batteryCapacityKwh: battery });
+        const m = design.metrics;
+        const tenYearEnergyCost = design.annualGridCostAed * 10;
+        if (goal === "autonomy") design.score = m.selfSufficiencyPercent * 100 - design.capexAed / 100 - m.curtailmentKwh * 8;
+        else if (goal === "cost") design.score = -(design.capexAed + tenYearEnergyCost);
+        else design.score = m.selfSufficiencyPercent * 1.2 + m.selfConsumptionPercent * 0.25 - design.capexAed / 700 - m.curtailmentKwh * 2;
+        candidates.push(design);
+      }
+    }
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  const recommended = candidates[0];
+  return { goal, baseline: evaluateDesign(config), recommended, evaluatedDesigns: candidates.length };
+}
+
 export function resultsToCsv(result) {
   const headers = ["hour","solar_kw","wind_kw","generation_kw","load_kw","battery_kwh","soc_percent","grid_import_kwh","grid_export_kwh","wind_mps","rain_mm","water_litres","soiling_percent","cleaning_litres"];
   const lines = result.rows.map((r) => [r.hour,r.solarKw,r.windKw,r.generationKw,r.loadKw,r.batteryKwh,r.socPercent,r.gridImportKwh,r.gridExportKwh,r.windMps,r.rainMm,r.waterLitres,r.soilingPercent,r.cleaningLitres].join(","));

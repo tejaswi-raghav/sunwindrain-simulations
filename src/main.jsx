@@ -1,6 +1,6 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { compareScenarios, DEFAULT_CONFIG, resultsToCsv, SCENARIOS, simulateDay } from "./simulation.js";
+import { compareScenarios, DEFAULT_CONFIG, optimizeDesign, resultsToCsv, SCENARIOS, simulateDay } from "./simulation.js";
 import "./style.css";
 
 const fmt = (value, digits = 1) => Number(value).toFixed(digits);
@@ -46,12 +46,76 @@ function Metric({ icon, label, value, detail, tone="" }) {
   return <article className={`metric ${tone}`}><div className="metric-icon"><Icon name={icon}/></div><span>{label}</span><strong>{value}</strong><small>{detail}</small></article>;
 }
 
+function EnergyFlow({ row, hour, playing, onPlayingChange, onHourChange }) {
+  const batteryPower = Math.abs(row.batteryFlowKwh);
+  const gridPower = row.gridImportKwh || row.gridExportKwh;
+  const flowWidth = (power) => 2 + Math.min(7, power * 7);
+  const batteryCharging = row.batteryFlowKwh > 0;
+  const gridImporting = row.gridImportKwh > 0;
+  const state = row.gridImportKwh > 0.01 ? "Grid assisting loads" : row.gridExportKwh > 0.01 ? "Surplus exported" : batteryCharging ? "Renewables charging battery" : batteryPower > 0.01 ? "Battery supporting loads" : "Renewables serving loads";
+  return <section className="panel system-panel">
+    <div className="panel-head"><div><span>LIVE ENERGY SYSTEM</span><small>{state}</small></div><i>{String(hour).padStart(2,"0")}:00</i></div>
+    <div className="system-visual" aria-live="polite">
+      <svg viewBox="0 0 760 330" role="img" aria-label={`Energy flow at ${hour}:00. Solar ${row.solarKw} kilowatts, wind ${row.windKw} kilowatts, load ${row.loadKw} kilowatts, battery ${row.socPercent} percent.`}>
+        <defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"/></marker></defs>
+        <path className={`energy-path solar-flow ${row.solarKw>0.01?"active":""}`} style={{strokeWidth:flowWidth(row.solarKw)}} d="M154 78 C230 78 245 148 310 148" markerEnd="url(#flow-arrow)"/>
+        <path className={`energy-path wind-flow ${row.windKw>0.01?"active":""}`} style={{strokeWidth:flowWidth(row.windKw)}} d="M154 250 C230 250 245 176 310 176" markerEnd="url(#flow-arrow)"/>
+        <path className="energy-path load-flow active" style={{strokeWidth:flowWidth(row.loadKw)}} d="M390 150 C470 150 475 76 545 76" markerEnd="url(#flow-arrow)"/>
+        <path className={`energy-path battery-flow ${batteryPower>0.01?"active":""}`} style={{strokeWidth:flowWidth(batteryPower)}} d={batteryCharging?"M390 164 L545 164":"M545 164 L390 164"} markerEnd="url(#flow-arrow)"/>
+        <path className={`energy-path grid-flow ${gridPower>0.01?"active":""}`} style={{strokeWidth:flowWidth(gridPower)}} d={gridImporting?"M545 252 C470 252 465 180 390 180":"M390 180 C465 180 470 252 545 252"} markerEnd="url(#flow-arrow)"/>
+        <g className="system-node source-node" transform="translate(54 42)"><circle cx="50" cy="36" r="35"/><text x="50" y="31" textAnchor="middle">SOLAR</text><text className="node-value" x="50" y="49" textAnchor="middle">{fmt(row.solarKw,2)} kW</text></g>
+        <g className="system-node source-node" transform="translate(54 214)"><circle cx="50" cy="36" r="35"/><text x="50" y="31" textAnchor="middle">WIND</text><text className="node-value" x="50" y="49" textAnchor="middle">{fmt(row.windKw,2)} kW</text></g>
+        <g className="system-node bus-node" transform="translate(310 124)"><rect width="80" height="80" rx="8"/><text x="40" y="34" textAnchor="middle">DC BUS</text><text className="node-value" x="40" y="52" textAnchor="middle">{fmt(row.generationKw,2)} kW</text></g>
+        <g className="system-node load-node" transform="translate(545 40)"><rect width="150" height="72" rx="8"/><text x="75" y="30" textAnchor="middle">HOME LOADS</text><text className="node-value" x="75" y="50" textAnchor="middle">{fmt(row.loadKw,2)} kW</text></g>
+        <g className="system-node battery-node" transform="translate(545 128)"><rect width="150" height="72" rx="8"/><text x="75" y="30" textAnchor="middle">BATTERY · {batteryCharging?"CHARGING":"DISCHARGING"}</text><text className="node-value" x="75" y="50" textAnchor="middle">{fmt(row.socPercent,0)}% SOC · {fmt(batteryPower,2)} kW</text></g>
+        <g className="system-node grid-node" transform="translate(545 216)"><rect width="150" height="72" rx="8"/><text x="75" y="30" textAnchor="middle">GRID · {gridImporting?"IMPORT":"EXPORT"}</text><text className="node-value" x="75" y="50" textAnchor="middle">{fmt(gridPower,2)} kW</text></g>
+      </svg>
+    </div>
+    <div className="timeline"><button onClick={() => onPlayingChange(!playing)} aria-label={playing?"Pause simulation":"Play simulation"}>{playing?"Ⅱ":"▶"}</button><input aria-label="Simulation hour" type="range" min="0" max="23" step="1" value={hour} onChange={(e) => onHourChange(Number(e.target.value))}/><output>{String(hour).padStart(2,"0")}:00</output></div>
+  </section>;
+}
+
+function OptimizerPanel({ optimization, goal, onGoalChange, onApply }) {
+  const { baseline, recommended, evaluatedDesigns } = optimization;
+  const specs = [
+    ["PV array", baseline.config.pvCapacityKw, recommended.config.pvCapacityKw, "kW"],
+    ["Wind turbine", baseline.config.windCapacityKw, recommended.config.windCapacityKw, "kW"],
+    ["Battery", baseline.config.batteryCapacityKwh, recommended.config.batteryCapacityKwh, "kWh"],
+  ];
+  return <section className="panel optimizer-panel">
+    <div className="panel-head"><div><span>DESIGN OPTIMIZER</span><small>{evaluatedDesigns} system combinations tested across clear, dusty and storm weather</small></div><i>10-year view</i></div>
+    <div className="optimizer-body">
+      <div className="optimizer-controls"><span>Optimize for</span>{[["balanced","Balanced"],["autonomy","Autonomy"],["cost","Lowest cost"]].map(([key,label]) => <button key={key} className={goal===key?"active":""} onClick={() => onGoalChange(key)}>{label}</button>)}</div>
+      <div className="optimizer-grid">
+        <div className="sizing-comparison"><div className="optimizer-labels"><span>System component</span><span>Current</span><span>Recommended</span></div>{specs.map(([label,current,next,unit]) => <div className="sizing-row" key={label}><b>{label}</b><span>{fmt(current,1)} {unit}</span><strong>{fmt(next,1)} {unit}</strong><div className="size-track"><i style={{width:`${Math.min(100,(current/Math.max(current,next))*100)}%`}}/><em style={{width:`${Math.min(100,(next/Math.max(current,next))*100)}%`}}/></div></div>)}</div>
+        <div className="optimizer-impact">
+          <span>EXPECTED WEATHER-WEIGHTED IMPACT</span>
+          <div><small>Self-sufficiency</small><b>{fmt(baseline.metrics.selfSufficiencyPercent,0)}% <i>→</i> {fmt(recommended.metrics.selfSufficiencyPercent,0)}%</b></div>
+          <div><small>Daily grid energy</small><b>{fmt(baseline.metrics.gridImportKwh)} <i>→</i> {fmt(recommended.metrics.gridImportKwh)} kWh</b></div>
+          <div><small>Estimated hardware</small><b>AED {baseline.capexAed.toLocaleString()} <i>→</i> {recommended.capexAed.toLocaleString()}</b></div>
+          <button onClick={onApply}>Apply recommended design <span>↗</span></button>
+        </div>
+      </div>
+      <p className="optimizer-note">Recommendation uses directional component costs and representative weather weights. Field measurements should replace these assumptions before procurement.</p>
+    </div>
+  </section>;
+}
+
 function App() {
   const [config,setConfig] = useState(DEFAULT_CONFIG);
+  const [hour,setHour] = useState(12);
+  const [playing,setPlaying] = useState(false);
+  const [goal,setGoal] = useState("balanced");
   const result = useMemo(() => simulateDay(config),[config]);
   const comparisons = useMemo(() => compareScenarios(config),[config]);
+  const optimization = useMemo(() => optimizeDesign(config,goal),[config,goal]);
   const update = (key,value) => setConfig((current) => ({...current,[key]:value}));
   const m = result.metrics;
+  useEffect(() => {
+    if (!playing) return undefined;
+    const timer = window.setInterval(() => setHour((current) => (current+1)%24),700);
+    return () => window.clearInterval(timer);
+  },[playing]);
   const downloadCsv = () => {
     const blob = new Blob([resultsToCsv(result)],{type:"text/csv;charset=utf-8"});
     const url = URL.createObjectURL(blob); const link = document.createElement("a");
@@ -60,18 +124,18 @@ function App() {
   return <div className="app">
     <header className="topbar">
       <a className="brand" href="#top"><span className="brand-glyph">SWR</span><span><b>SunWindRain</b><small>Simulation workspace</small></span></a>
-      <div className="top-status"><span className="status-dot"/> MODEL ONLINE <i>v0.1</i></div>
+      <div className="top-status"><span className="status-dot"/> MODEL ONLINE <i>v0.2</i></div>
       <button className="export" onClick={downloadCsv}><Icon name="download"/> Export CSV</button>
     </header>
     <main id="top">
-      <section className="intro"><div><p className="eyebrow">SYSTEM DIGITAL TWIN / UAE ROOFTOP</p><h1>Test the resource loop<br/><em>before hardware.</em></h1></div><p className="intro-copy">Explore how solar, urban wind, battery dispatch, rainfall, and panel cleaning interact across a representative 24-hour period. Every control updates the model immediately.</p></section>
+      <section className="intro"><div><p className="eyebrow">ENERGY SYSTEM VISUALIZER / UAE ROOFTOP</p><h1>Watch energy move.<br/><em>Optimize the system.</em></h1></div><p className="intro-copy">Scrub through a day to see solar, wind, battery and grid power move through the architecture—then compare hundreds of system sizes to find a better design.</p></section>
       <section className="workspace">
         <aside className="sidebar">
           <div className="side-head"><span>SCENARIO</span><small>01</small></div>
           <div className="scenario-list">{Object.entries(SCENARIOS).map(([key,s]) => <button key={key} className={config.scenario===key?"active":""} onClick={() => update("scenario",key)}><span className={`scenario-icon ${key}`}><Icon name={key==="clear"?"sun":key==="dusty"?"wind":"water"}/></span><span><b>{s.label}</b><small>{s.description}</small></span><i>↗</i></button>)}</div>
           <div className="side-head parameters"><span>PARAMETERS</span><small>02</small></div>
           <Slider label="Household load" value={config.dailyLoadKwh} min={2} max={18} step={0.2} unit=" kWh" onChange={(v) => update("dailyLoadKwh",v)} hint="Representative daily demand"/>
-          <Slider label="Starting battery" value={config.initialSocPercent} min={20} max={100} step={1} unit="%" onChange={(v) => update("initialSocPercent",v)} hint="3.5 kWh usable storage"/>
+          <Slider label="Starting battery" value={config.initialSocPercent} min={20} max={100} step={1} unit="%" onChange={(v) => update("initialSocPercent",v)} hint={`${fmt(config.batteryCapacityKwh,1)} kWh usable storage`}/>
           <Slider label="Panel soiling" value={config.soilingPercent} min={0} max={30} step={1} unit="%" onChange={(v) => update("soilingPercent",v)} hint="Cleaning trigger is above 15%"/>
           <Slider label="Rainfall event" value={config.rainMm} min={0} max={60} step={1} unit=" mm" onChange={(v) => update("rainMm",v)} hint="Applied to the rain-event scenario"/>
           <Slider label="Starting tank" value={config.initialWaterLitres} min={0} max={300} step={5} unit=" L" onChange={(v) => update("initialWaterLitres",v)} hint="300 L storage capacity"/>
@@ -85,7 +149,9 @@ function App() {
             <Metric icon="grid" label="Grid import" value={`${fmt(m.gridImportKwh)} kWh`} detail={`${fmt(m.gridExportKwh)} kWh exported`} tone="amber"/>
             <Metric icon="water" label="Water recovered" value={`${fmt(m.capturedWaterLitres,0)} L`} detail={`${fmt(m.endWaterLitres,0)} L ending tank level`} tone="cyan"/>
           </div>
+          <EnergyFlow row={result.rows[hour]} hour={hour} playing={playing} onPlayingChange={setPlaying} onHourChange={(next) => {setPlaying(false);setHour(next);}}/>
           <section className="panel chart-panel"><div className="panel-head"><div><span>ENERGY DISPATCH</span><small>Generation, demand and storage state</small></div><i>Hourly timestep</i></div><DispatchChart rows={result.rows}/></section>
+          <OptimizerPanel optimization={optimization} goal={goal} onGoalChange={setGoal} onApply={() => setConfig((current) => ({...current,pvCapacityKw:optimization.recommended.config.pvCapacityKw,windCapacityKw:optimization.recommended.config.windCapacityKw,batteryCapacityKwh:optimization.recommended.config.batteryCapacityKwh}))}/>
           <div className="lower-grid">
             <section className="panel scenario-panel"><div className="panel-head"><div><span>SCENARIO COMPARISON</span><small>Same system settings, different weather</small></div><i>3 runs</i></div><div className="comparison-table">
               <div className="table-row table-labels"><span>Scenario</span><span>Yield</span><span>Autonomy</span><span>Water</span></div>
@@ -101,7 +167,7 @@ function App() {
         </div>
       </section>
     </main>
-    <footer><span>SunWindRain MVP · Model inputs derived from the commercialization overview</span><span>PV 0.8 kW · VAWT 0.4 kW · LiFePO₄ 3.5 kWh · Water 300 L</span></footer>
+    <footer><span>SunWindRain MVP · Model inputs derived from the commercialization overview</span><span>PV {fmt(config.pvCapacityKw,1)} kW · VAWT {fmt(config.windCapacityKw,1)} kW · LiFePO₄ {fmt(config.batteryCapacityKwh,1)} kWh · Water 300 L</span></footer>
   </div>;
 }
 
