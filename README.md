@@ -13,11 +13,13 @@ Run `npm test` for the dispatch-engine tests and `npm run build` for a productio
 
 ## Included
 - Hourly solar, wind, load, battery, and grid dispatch model
+- Animated energy-flow schematic with a 24-hour playback control
 - Clear-day, dust-event, and rain-event scenarios
 - Battery reserve protection and configurable grid export
 - Rainwater capture with first-flush diversion and tank limits
 - Condition-based solar cleaning logic
 - Scenario comparison, control log, and CSV export
+- Multi-objective design optimizer for autonomy, cost, or a balanced system
 
 ## Model scope
 The MVP uses the commercialization overview's headline system specification: 800 W PV, 400 W VAWT, 3.5 kWh usable LiFePO4 storage, 300 L water storage, and a 20% battery reserve. Results are directional engineering estimates and should be calibrated against measured UAE rooftop data before investment or equipment decisions.
