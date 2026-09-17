@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_CONFIG, resultsToCsv, simulateDay } from "../src/simulation.js";
+import { DEFAULT_CONFIG, optimizeDesign, resultsToCsv, simulateDay } from "../src/simulation.js";
 
 test("runs a complete 24-hour dispatch", () => {
   const result = simulateDay(DEFAULT_CONFIG);
@@ -27,4 +27,12 @@ test("exports one header and 24 hourly CSV rows", () => {
   const csv = resultsToCsv(simulateDay(DEFAULT_CONFIG));
   assert.equal(csv.trim().split("\n").length, 25);
   assert.match(csv, /^hour,solar_kw/);
+});
+test("optimizer returns a bounded design with evaluated performance", () => {
+  const optimized = optimizeDesign(DEFAULT_CONFIG, "balanced");
+  assert.ok(optimized.evaluatedDesigns > 300);
+  assert.ok(optimized.recommended.config.pvCapacityKw >= 0.6 && optimized.recommended.config.pvCapacityKw <= 2);
+  assert.ok(optimized.recommended.config.windCapacityKw >= 0 && optimized.recommended.config.windCapacityKw <= 1);
+  assert.ok(optimized.recommended.config.batteryCapacityKwh >= 2 && optimized.recommended.config.batteryCapacityKwh <= 8);
+  assert.ok(optimized.recommended.metrics.selfSufficiencyPercent >= 0 && optimized.recommended.metrics.selfSufficiencyPercent <= 100);
 });
